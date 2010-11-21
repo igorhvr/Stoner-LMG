@@ -163,7 +163,7 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
     @Override
     public void killAllConsumers(String queueName) throws InterruptedException {
         end = true;
-
+/* FIXME
         if (this.waitForEmptyQueueWhenKillConsumers) {
             try {
                 ClientSession session = getSessionFactory(queueName).createSession();
@@ -171,6 +171,7 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
                         new SimpleString(queueName));
 
                 while (q.getMessageCount() > 0) {
+                    System.out.println(queueName + ": " + q.getMessageCount());
                     Thread.sleep(1000);
                     q = session.queueQuery(new SimpleString(queueName));
                 }
@@ -178,7 +179,7 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
                 e.printStackTrace();
             }
         }
-
+*/
         consumers.get(queueName).release();
     }
 
