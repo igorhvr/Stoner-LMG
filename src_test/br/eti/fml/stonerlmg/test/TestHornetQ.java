@@ -15,7 +15,6 @@ import br.fml.eti.machinegun.DirtyWork;
 import br.fml.eti.machinegun.MachineGun;
 import br.fml.eti.machinegun.auditorship.ArmyAudit;
 import br.fml.eti.machinegun.externaltools.ImportedWeapons;
-import br.fml.eti.machinegun.externaltools.PersistedQueueManager;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -45,7 +44,7 @@ public class TestHornetQ {
         ArmyAudit armyAudit = new SystemOutAudit();
 
         // create a fake "persisted" queue manager. It just use BlockingQueue
-        PersistedQueueManager queueManager = new HornetQPersistedQueueManager();
+        HornetQPersistedQueueManager queueManager = new HornetQPersistedQueueManager();
         ImportedWeapons importedWeapons = new ImportedWeapons(queueManager);
 
         // create an Army to make machine guns
@@ -80,8 +79,8 @@ public class TestHornetQ {
                     // get a machine gun to strafe
                     MachineGun<Integer> machineGun = army.getANewMachineGun();
 
-                    // Produces 10.000 elements
-                    for (int j = 0; j < 10000; j++) {
+                    // Produces 1.000 elements
+                    for (int j = 0; j < 1000; j++) {
                         try {
                             int n = sequential++;
                             System.out.println(Thread
@@ -110,6 +109,9 @@ public class TestHornetQ {
 
         // make all consumers die
         army.stopTheMission("default mission");
+
+        // shutdown HornetQ
+        queueManager.shutdown();
 
         // everything was well processed?
         Assert.assertTrue(processed.size() == 0);
