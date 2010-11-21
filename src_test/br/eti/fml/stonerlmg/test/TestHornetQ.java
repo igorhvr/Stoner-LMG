@@ -44,7 +44,7 @@ public class TestHornetQ {
         ArmyAudit armyAudit = new SystemOutAudit();
 
         // create a fake "persisted" queue manager. It just use BlockingQueue
-        HornetQPersistedQueueManager queueManager = new HornetQPersistedQueueManager();
+        HornetQPersistedQueueManager queueManager = new HornetQPersistedQueueManager(true);
         ImportedWeapons importedWeapons = new ImportedWeapons(queueManager);
 
         // create an Army to make machine guns
@@ -67,7 +67,7 @@ public class TestHornetQ {
         Capsule<Integer> capsule = new CapsuleInteger();
 
         // start the mission called "default mission" working on "default queue"
-        army.startNewMission("default mission", "default queue",
+        army.startNewMission("default mission", "queue.default",
                 dirtyWorkFactory, capsule);
 
         Thread[] threads = new Thread[100];
@@ -79,8 +79,8 @@ public class TestHornetQ {
                     // get a machine gun to strafe
                     MachineGun<Integer> machineGun = army.getANewMachineGun();
 
-                    // Produces 1.000 elements
-                    for (int j = 0; j < 1000; j++) {
+                    // Produces 100 elements
+                    for (int j = 0; j < 10; j++) {
                         try {
                             int n = sequential++;
                             System.out.println(Thread
@@ -114,6 +114,7 @@ public class TestHornetQ {
         queueManager.shutdown();
 
         // everything was well processed?
+        System.out.println("Missing: " + processed.size());
         Assert.assertTrue(processed.size() == 0);
     }
 }

@@ -28,8 +28,6 @@ import org.hornetq.core.server.impl.HornetQServerImpl;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -44,15 +42,18 @@ import java.util.concurrent.Semaphore;
  */
 public class HornetQPersistedQueueManager implements PersistedQueueManager {
     private HornetQServerImpl server;
+    private boolean end = false;
 
     private Map<String, ClientSessionFactory> clientSessionFactories
             = new HashMap<String, ClientSessionFactory>();
 
     private Semaphore semaphore = new Semaphore(1);
+    private Map<String, Semaphore> consumers = new HashMap<String, Semaphore>();
+    private boolean waitForEmptyQueueWhenKillConsumers = false;
 
-    private Collection<Semaphore> consumers = new ArrayList<Semaphore>();
+    public HornetQPersistedQueueManager(boolean waitForEmptyQueueWhenKillConsumers) throws Exception {
+        this.waitForEmptyQueueWhenKillConsumers = waitForEmptyQueueWhenKillConsumers;
 
-    public HornetQPersistedQueueManager() throws Exception {
         Configuration config = new ConfigurationImpl();
         HashSet<TransportConfiguration> transports = new HashSet<TransportConfiguration>();
         transports.add(new TransportConfiguration(NettyAcceptorFactory.class.getName()));
@@ -62,6 +63,7 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
         config.setJournalType(JournalType.NIO);
         config.setSecurityEnabled(false);
         config.setLargeMessagesDirectory("data");
+        config.setMessageCounterEnabled(true);
 
         this.server = new HornetQServerImpl(config);
         this.server.start();
@@ -92,19 +94,27 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
 
     @Override
     public void putIntoAnEmbeddedQueue(ArmyAudit armyAudit,
-                                       String queue, byte[] bytes) throws InterruptedException {
+            String queue, byte[] bytes) throws InterruptedException {
 
-        try {
-            ClientSession session = getSessionFactory(queue).createSession();
-            ClientProducer producer = session.createProducer(queue);
-            ClientMessage message = session.createMessage(true);
-            ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
-            message.setBodyInputStream(byteArrayInputStream);
-            producer.send(message);
-            session.commit();
-            session.close();
-        } catch (Exception e) {
-            armyAudit.errorWhenPuttingIntoAnEmbeddedQueue(e);
+        if (this.end) {
+            armyAudit.errorWhenPuttingIntoAnEmbeddedQueue(
+                    new InterruptedException("The queue "
+                            + queue + " is already down!"));
+        } else {
+            try {
+                ClientSession session = getSessionFactory(queue).createSession();
+                ClientProducer producer = session.createProducer(queue);
+                ClientMessage message = session.createMessage(true);
+                ByteArrayInputStream byteArrayInputStream
+                        = new ByteArrayInputStream(bytes);
+
+                message.setBodyInputStream(byteArrayInputStream);
+                producer.send(message);
+                session.commit();
+                session.close();
+            } catch (Exception e) {
+                armyAudit.errorWhenPuttingIntoAnEmbeddedQueue(e);
+            }
         }
     }
 
@@ -116,7 +126,7 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
         new Thread() {
             public void run() {
                 Semaphore semaphore = new Semaphore(0);
-                consumers.add(semaphore);
+                consumers.put(queue, semaphore);
 
                 try {
                     ClientSession session = getSessionFactory(queue).createSession();
@@ -152,9 +162,24 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
 
     @Override
     public void killAllConsumers(String queueName) throws InterruptedException {
-        for (Semaphore s : consumers) {
-            s.release();
+        end = true;
+
+        if (this.waitForEmptyQueueWhenKillConsumers) {
+            try {
+                ClientSession session = getSessionFactory(queueName).createSession();
+                ClientSession.QueueQuery q = session.queueQuery(
+                        new SimpleString(queueName));
+
+                while (q.getMessageCount() > 0) {
+                    Thread.sleep(1000);
+                    q = session.queueQuery(new SimpleString(queueName));
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
+
+        consumers.get(queueName).release();
     }
 
     public void shutdown() throws Exception {
