@@ -1,0 +1,14 @@
+# Backup files
+*~
+
+# Project files
+.idea/
+*.iml
+*.eml
+.classpath
+.project
+
+# Compile generated files
+out/
+deploy/
+doc/javadoc/
