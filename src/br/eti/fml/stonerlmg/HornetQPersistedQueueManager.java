@@ -9,7 +9,7 @@ package br.eti.fml.stonerlmg;
 import br.fml.eti.machinegun.auditorship.ArmyAudit;
 import br.fml.eti.machinegun.externaltools.Consumer;
 import br.fml.eti.machinegun.externaltools.PersistedQueueManager;
-import org.hornetq.api.core.HornetQException;
+import org.hornetq.api.core.SimpleString;
 import org.hornetq.api.core.TransportConfiguration;
 import org.hornetq.api.core.client.ClientConsumer;
 import org.hornetq.api.core.client.ClientMessage;
@@ -23,13 +23,17 @@ import org.hornetq.core.config.impl.ConfigurationImpl;
 import org.hornetq.core.remoting.impl.invm.InVMAcceptorFactory;
 import org.hornetq.core.remoting.impl.invm.InVMConnectorFactory;
 import org.hornetq.core.remoting.impl.netty.NettyAcceptorFactory;
+import org.hornetq.core.server.JournalType;
 import org.hornetq.core.server.impl.HornetQServerImpl;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
 
 /**
  * HornetQ implementation of
@@ -41,49 +45,49 @@ import java.util.Map;
 public class HornetQPersistedQueueManager implements PersistedQueueManager {
     private HornetQServerImpl server;
 
-    private Map<String, ClientSession> sessions = new HashMap<String, ClientSession>();
-    private Map<String, ClientProducer> producers = new HashMap<String, ClientProducer>();
-    private Map<String, ClientConsumer> consumers = new HashMap<String, ClientConsumer>();
+    private Map<String, ClientSessionFactory> clientSessionFactories
+            = new HashMap<String, ClientSessionFactory>();
+
+    private Semaphore semaphore = new Semaphore(1);
+
+    private Collection<Semaphore> consumers = new ArrayList<Semaphore>();
 
     public HornetQPersistedQueueManager() throws Exception {
         Configuration config = new ConfigurationImpl();
         HashSet<TransportConfiguration> transports = new HashSet<TransportConfiguration>();
         transports.add(new TransportConfiguration(NettyAcceptorFactory.class.getName()));
         transports.add(new TransportConfiguration(InVMAcceptorFactory.class.getName()));
+
         config.setAcceptorConfigurations(transports);
+        config.setJournalType(JournalType.NIO);
+        config.setSecurityEnabled(false);
+        config.setLargeMessagesDirectory("data");
 
         this.server = new HornetQServerImpl(config);
         this.server.start();
     }
 
-    private synchronized ClientSession getSession(String queueName) throws HornetQException {
-        if (!this.sessions.containsKey(queueName)) {
-            ClientSessionFactory nettyFactory
-                    = HornetQClient.createClientSessionFactory(
-                            new TransportConfiguration(
-                                    InVMConnectorFactory.class.getName()));
+    private ClientSessionFactory getSessionFactory(String queueName) throws Exception {
+        
+        try {
+            semaphore.acquire();
 
-            ClientSession session = nettyFactory.createSession();
-            session.createQueue(queueName, queueName, true);
-            session.start();
+            if (!this.clientSessionFactories.containsKey(queueName)) {
+                ClientSessionFactory nettyFactory
+                        = HornetQClient.createClientSessionFactory(
+                                new TransportConfiguration(
+                                        InVMConnectorFactory.class.getName()));
 
-            ClientProducer clientProducer = session.createProducer(queueName);
-            ClientConsumer clientConsumer = session.createConsumer(queueName);
+                this.server.deployQueue(new SimpleString(queueName),
+                        new SimpleString(queueName), null, true, false);
 
-            this.producers.put(queueName, clientProducer);
-            this.consumers.put(queueName, clientConsumer);
-            this.sessions.put(queueName, session);
+                this.clientSessionFactories.put(queueName, nettyFactory);
+            }
+
+            return this.clientSessionFactories.get(queueName);
+        } finally {
+            semaphore.release();
         }
-
-        return this.sessions.get(queueName);
-    }
-
-    private ClientProducer getProducer(String queue) throws HornetQException {
-        return this.producers.get(queue);
-    }
-
-    private ClientConsumer getConsumer(String queue) throws HornetQException {
-        return this.consumers.get(queue);
     }
 
     @Override
@@ -91,13 +95,14 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
                                        String queue, byte[] bytes) throws InterruptedException {
 
         try {
-            ClientSession session = getSession(queue);
-            ClientProducer producer = getProducer(queue);
+            ClientSession session = getSessionFactory(queue).createSession();
+            ClientProducer producer = session.createProducer(queue);
             ClientMessage message = session.createMessage(true);
             ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
             message.setBodyInputStream(byteArrayInputStream);
             producer.send(message);
             session.commit();
+            session.close();
         } catch (Exception e) {
             armyAudit.errorWhenPuttingIntoAnEmbeddedQueue(e);
         }
@@ -105,38 +110,50 @@ public class HornetQPersistedQueueManager implements PersistedQueueManager {
 
     @Override
     public void registerANewConsumerInAnEmbeddedQueue(
-            final ArmyAudit armyAudit, final String queue, final Consumer consumer) {
+            final ArmyAudit armyAudit, final String queue,
+            final Consumer consumer) {
 
-        try {
-            ClientSession session = getSession(queue);
-            ClientConsumer clientConsumer = getConsumer(queue);
+        new Thread() {
+            public void run() {
+                Semaphore semaphore = new Semaphore(0);
+                consumers.add(semaphore);
 
-            clientConsumer.setMessageHandler(new MessageHandler() {
+                try {
+                    ClientSession session = getSessionFactory(queue).createSession();
+                    ClientConsumer clientConsumer = session.createConsumer(queue);
+                    session.start();
 
-                @Override
-                public void onMessage(ClientMessage clientMessage) {
-                    ByteArrayOutputStream byteArrayOutputStream
-                            = new ByteArrayOutputStream();
+                    clientConsumer.setMessageHandler(new MessageHandler() {
+                        @Override
+                        public void onMessage(ClientMessage clientMessage) {
+                            ByteArrayOutputStream byteArrayOutputStream
+                                    = new ByteArrayOutputStream();
 
-                    try {
-                        clientMessage.saveToOutputStream(byteArrayOutputStream);
-                        consumer.consume(byteArrayOutputStream.toByteArray());
-                    } catch (Exception e) {
-                        armyAudit.errorWhenRegisteringANewConsumerInAnEmbeddedQueue(e);
-                    }
+                            try {
+                                clientMessage.saveToOutputStream(byteArrayOutputStream);
+                                consumer.consume(byteArrayOutputStream.toByteArray());
+                            } catch (Exception e) {
+                                armyAudit.errorWhenRegisteringANewConsumerInAnEmbeddedQueue(e);
+                            }
+                        }
+                    });
+
+                    semaphore.acquire();
+
+                    session.stop();
+                    session.close();
+
+                } catch (Exception e) {
+                    armyAudit.errorWhenRegisteringANewConsumerInAnEmbeddedQueue(e);
                 }
-            });
-        } catch (Exception e) {
-            armyAudit.errorWhenRegisteringANewConsumerInAnEmbeddedQueue(e);            
-        }
+            }
+        }.start();
     }
 
     @Override
     public void killAllConsumers(String queueName) throws InterruptedException {
-        try {
-            getSession(queueName).close();
-        } catch (HornetQException e) {
-            e.printStackTrace();
+        for (Semaphore s : consumers) {
+            s.release();
         }
     }
 
